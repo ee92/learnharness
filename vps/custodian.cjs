@@ -28,6 +28,7 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const http = require("node:http");
+const net = require("node:net");
 const crypto = require("node:crypto");
 const { fork } = require("node:child_process");
 
@@ -84,6 +85,31 @@ const subscriptions = createSubscriptions({
 const desktopAPISecret = crypto.randomBytes(32).toString("hex");
 let child = null;
 let shuttingDown = false;
+let internalPort = null;
+
+// With LH_DESKTOP_SERVER=1 the server requires x-learnharness-desktop on
+// every API request (src/server/desktop-access.ts) — on the desktop,
+// Electron injects it into the trusted window's requests. Here the public
+// port is a thin streaming proxy that injects the header; real access
+// control is the Cloudflare Access gate in front of the subdomain.
+const freePort = () => new Promise((resolve, reject) => {
+	const probe = net.createServer();
+	probe.once("error", reject);
+	probe.listen(0, "127.0.0.1", () => { const p = probe.address().port; probe.close(() => resolve(p)); });
+});
+
+const proxy = http.createServer((req, res) => {
+	const up = http.request({
+		host: "127.0.0.1", port: internalPort, path: req.url, method: req.method,
+		headers: { ...req.headers, "x-learnharness-desktop": desktopAPISecret },
+	}, (upstream) => {
+		res.writeHead(upstream.statusCode, upstream.headers);
+		upstream.pipe(res);
+	});
+	up.on("error", () => { if (!res.headersSent) res.writeHead(503, { "content-type": "text/plain" }); res.end("LearnHarness server is starting — retry in a moment."); });
+	req.pipe(up);
+});
+proxy.on("upgrade", (req, socket) => socket.destroy()); // SSE only; no websockets upstream
 
 function startServer() {
 	child = fork(SERVER_ENTRY, [], {
@@ -91,7 +117,7 @@ function startServer() {
 		env: {
 			...process.env,
 			NODE_ENV: "production",
-			PORT: String(PORT),
+			PORT: String(internalPort),
 			HOSTNAME: "127.0.0.1",
 			LH_DATA_DIR: DATA_DIR,
 			LH_AUTH_FILE: path.join(DATA_DIR, "auth.json"),
@@ -112,7 +138,7 @@ function startServer() {
 		log(`server exited (code=${code} signal=${signal}) — restarting in 2s`);
 		setTimeout(startServer, 2000);
 	});
-	log(`server forked (pid ${child.pid}, port ${PORT}, data ${DATA_DIR})`);
+	log(`server forked (pid ${child.pid}, internal port ${internalPort}, data ${DATA_DIR})`);
 }
 
 // ─── admin endpoint: 127.0.0.1 only, for the operator's shell ─────────────
@@ -170,8 +196,10 @@ const admin = http.createServer(async (req, res) => {
 
 (async () => {
 	await subscriptions.ready;
+	internalPort = await freePort();
 	admin.on("error", (err) => log(`admin endpoint unavailable (${err.code}) — app keeps running without it`));
 	admin.listen(ADMIN_PORT, "127.0.0.1", () => log(`admin on 127.0.0.1:${ADMIN_PORT}`));
+	proxy.listen(PORT, "127.0.0.1", () => log(`public proxy on 127.0.0.1:${PORT} → ${internalPort}`));
 	startServer();
 })();
 
