@@ -24,6 +24,8 @@ jobs:
       - run: npm run build
       - run: node scripts/build-server.mjs
       - run: node scripts/smoke-server.mjs
+      # electron/chatgpt.cjs needs jose at runtime; the trace only covers server imports
+      - run: cp -r node_modules/jose .next/standalone/node_modules/jose
       - run: tar -C .next -czf standalone.tar.gz standalone
       - name: publish rolling release
         env:
