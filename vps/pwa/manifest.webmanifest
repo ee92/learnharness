@@ -1,0 +1,14 @@
+{
+	"name": "Learning Harness",
+	"short_name": "Learn",
+	"description": "A teacher agent with a memory — sessions, quizzes, and a knowledge graph of what you know.",
+	"start_url": "/",
+	"scope": "/",
+	"display": "standalone",
+	"background_color": "#141414",
+	"theme_color": "#141414",
+	"icons": [
+		{ "src": "/pwa/icon-192.png", "sizes": "192x192", "type": "image/png" },
+		{ "src": "/pwa/icon-512.png", "sizes": "512x512", "type": "image/png" }
+	]
+}
