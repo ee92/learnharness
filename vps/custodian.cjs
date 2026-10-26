@@ -98,11 +98,57 @@ const freePort = () => new Promise((resolve, reject) => {
 	probe.listen(0, "127.0.0.1", () => { const p = probe.address().port; probe.close(() => resolve(p)); });
 });
 
+// PWA layer (iPhone add-to-home-screen standalone mode): upstream ships no
+// manifest or Apple head tags, so the proxy serves our assets and injects
+// the tags into HTML — upstream stays untouched.
+const PWA_DIR = path.join(__dirname, "pwa");
+const PWA_ASSETS = {
+	"/manifest.webmanifest": ["manifest.webmanifest", "application/manifest+json"],
+	"/apple-touch-icon.png": ["apple-touch-icon.png", "image/png"],
+	"/pwa/icon-192.png": ["icon-192.png", "image/png"],
+	"/pwa/icon-512.png": ["icon-512.png", "image/png"],
+};
+const PWA_HEAD = [
+	'<link rel="manifest" href="/manifest.webmanifest"/>',
+	'<link rel="apple-touch-icon" href="/apple-touch-icon.png"/>',
+	'<meta name="apple-mobile-web-app-capable" content="yes"/>',
+	'<meta name="mobile-web-app-capable" content="yes"/>',
+	'<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>',
+	'<meta name="apple-mobile-web-app-title" content="Learn"/>',
+	'<meta name="theme-color" content="#141414"/>',
+].join("");
+
 const proxy = http.createServer((req, res) => {
+	const asset = PWA_ASSETS[(req.url || "").split("?")[0]];
+	if (asset) {
+		try {
+			const body = fs.readFileSync(path.join(PWA_DIR, asset[0]));
+			res.writeHead(200, { "content-type": asset[1], "content-length": body.length, "cache-control": "public, max-age=3600" });
+			return res.end(body);
+		} catch { res.writeHead(404); return res.end(); }
+	}
+	// Drop accept-encoding so upstream answers uncompressed (loopback hop;
+	// the CF edge re-compresses for clients) — HTML rewriting needs plaintext.
+	const headers = { ...req.headers, "x-learnharness-desktop": desktopAPISecret };
+	delete headers["accept-encoding"];
 	const up = http.request({
-		host: "127.0.0.1", port: internalPort, path: req.url, method: req.method,
-		headers: { ...req.headers, "x-learnharness-desktop": desktopAPISecret },
+		host: "127.0.0.1", port: internalPort, path: req.url, method: req.method, headers,
 	}, (upstream) => {
+		if ((upstream.headers["content-type"] || "").startsWith("text/html")) {
+			const chunks = [];
+			upstream.on("data", (c) => chunks.push(c));
+			upstream.on("end", () => {
+				let body = Buffer.concat(chunks);
+				const html = body.toString("utf8");
+				if (html.includes("</head>")) body = Buffer.from(html.replace("</head>", `${PWA_HEAD}</head>`), "utf8");
+				const h = { ...upstream.headers, "content-length": body.length };
+				delete h["transfer-encoding"];
+				res.writeHead(upstream.statusCode, h);
+				res.end(body);
+			});
+			upstream.on("error", () => res.destroy());
+			return;
+		}
 		res.writeHead(upstream.statusCode, upstream.headers);
 		upstream.pipe(res);
 	});
