@@ -1,0 +1,37 @@
+# Off-box build for the headless web deploy (see vps/custodian.cjs).
+# The VPS is memory-constrained; building there starves its app lane.
+# Every push to `vps` rebuilds the standalone server payload and overwrites
+# the rolling `vps-latest` release, which the VPS downloads tokenlessly.
+name: vps-build
+
+on:
+  push:
+    branches: [vps]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: node scripts/build-server.mjs
+      - run: node scripts/smoke-server.mjs
+      - run: tar -C .next -czf standalone.tar.gz standalone
+      - name: publish rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete vps-latest --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create vps-latest standalone.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "VPS build $(date -u +%Y-%m-%dT%H:%MZ)" \
+            --notes "commit $GITHUB_SHA"
